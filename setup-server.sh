@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+#
+# setup-server.sh — reproduce the zsh shell setup on a headless server.
+#
+# Supported: Debian / Ubuntu (amd64 / arm64). Can run as root or as a normal
+# user with sudo. For a desktop with Hyper and fonts use setup-desktop.sh.
+#
+# What it sets up:
+#   - zsh, started through the zflash plugin manager (github.com/arastu/zflash):
+#     Oh My Zsh's library + git plugin, starship prompt, zsh-completions,
+#     syntax highlighting, history substring search and autosuggestions
+#   - ~/.zshrc, ~/.zshenv, ~/.config/zflash/plugins.zsh and
+#     ~/.zsh/{options,exports,history,completion,keybindings,aliases}.zsh
+#   - git, htop, gcal, uv (Python package manager, in ~/.local/bin)
+#   - en_US.UTF-8 locale
+#
+# No Hyper or fonts: Persian/RTL rendering happens in the terminal you connect
+# from, so run setup-desktop.sh there.
+#
+# Usage:  bash setup-server.sh
+#
+# Existing config files are backed up as <file>.bak-<timestamp> before being replaced.
+
+set -euo pipefail
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+
+info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Move an existing file out of the way before writing a new one.
+backup() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    mv "$1" "$1.bak-$STAMP"
+    info "Backed up $1 -> $1.bak-$STAMP"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+[ "$(uname -s)" = Linux ] || die "This script is for Linux servers. On a desktop use setup-desktop.sh."
+command -v apt-get >/dev/null 2>&1 || die "Only Debian/Ubuntu (apt) Linux distributions are supported."
+
+case "$(uname -m)" in
+  x86_64|amd64)  ARCH=amd64 ;;
+  arm64|aarch64) ARCH=arm64 ;;
+  *) die "Unsupported CPU architecture: $(uname -m)" ;;
+esac
+
+# Servers are often set up as root, where sudo may not be installed yet.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  command -v sudo >/dev/null 2>&1 || die "sudo is required when not running as root."
+  SUDO="sudo"
+fi
+USER="${USER:-$(id -un)}"
+
+info "Detected Debian/Ubuntu ($ARCH), running as $USER"
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+info "Installing packages with apt"
+$SUDO apt-get update
+# sudo: the `shtop` and `bup` aliases use it, even for root.
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  zsh git curl ca-certificates locales sudo gcal htop
+
+info "Enabling the en_US.UTF-8 locale"
+$SUDO sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+grep -q '^en_US.UTF-8 UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' | $SUDO tee -a /etc/locale.gen >/dev/null
+$SUDO locale-gen
+
+if ! command -v starship >/dev/null 2>&1; then
+  info "Installing starship"
+  curl -fsSL https://starship.rs/install.sh | sh -s -- -y
+fi
+
+if ! command -v uv >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uv" ]; then
+  info "Installing uv"
+  # ~/.local/bin is already on PATH via ~/.zshenv; don't let it edit rc files.
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
+fi
+
+# ---------------------------------------------------------------------------
+# Oh My Zsh
+# ---------------------------------------------------------------------------
+if [ -d "$HOME/.oh-my-zsh" ]; then
+  info "Oh My Zsh is already installed"
+else
+  info "Installing Oh My Zsh"
+  RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+fi
+
+# ---------------------------------------------------------------------------
+# zflash (zsh plugin manager)
+# ---------------------------------------------------------------------------
+ZFLASH_DIR="$HOME/.local/share/zflash/zflash"
+if [ -d "$ZFLASH_DIR/.git" ]; then
+  info "zflash is already installed"
+else
+  info "Installing zflash"
+  mkdir -p "$(dirname "$ZFLASH_DIR")"
+  git clone --quiet --depth=1 https://github.com/arastu/zflash.git "$ZFLASH_DIR"
+fi
+mkdir -p "$HOME/.cache/zflash"
+
+# ---------------------------------------------------------------------------
+# zsh config
+# ---------------------------------------------------------------------------
+info "Writing zsh config"
+mkdir -p "$HOME/.zsh" "$HOME/.config/zflash"
+
+backup "$HOME/.zshrc"
+cat > "$HOME/.zshrc" <<'EOF'
+# ~/.zshrc — the whole file. Everything else is listed, in order, in the zflash
+# spec (~/.config/zflash/plugins.zsh): exports and the prompt before the first
+# prompt; oh-my-zsh, completions, conda and aliases after it.
+source "$HOME/.local/share/zflash/zflash/zflash.zsh"
+zflash boot "$HOME/.config/zflash/plugins.zsh"
+EOF
+
+backup "$HOME/.zshenv"
+cat > "$HOME/.zshenv" <<'EOF'
+# uv
+export PATH="$HOME/.local/bin:$PATH"
+EOF
+
+backup "$HOME/.config/zflash/plugins.zsh"
+cat > "$HOME/.config/zflash/plugins.zsh" <<'EOF'
+# zflash spec — everything this shell loads, in order.
+# Evaluated only by `zflash build`, never at shell start. Edit, then open a new
+# tab (zflash rebuilds automatically when this file is newer than the init).
+#
+#   zflash load  <repo|file> [path ...]   source before the first prompt
+#   zflash defer <repo|file> [path ...]   source after the first prompt
+#   zflash fpath <repo|dir>  [path ...]   completions only
+#   zflash eval [--defer] '<cmd>'         run at build time, inline the output
+
+# ── before the first prompt ──────────────────────────────────────────────
+zflash load ~/.zsh/options.zsh   # setopt must be here: deferred files can't set options
+zflash load ~/.zsh/exports.zsh
+
+# oh-my-zsh base library (lib/*.zsh) from the existing checkout, deferred
+# except lib/history.zsh, which zflash keeps before the prompt.
+zflash defer ~/.oh-my-zsh
+zflash load ~/.zsh/history.zsh
+
+# starship prompt, captured once at build time (no fork per shell).
+zflash eval 'starship init zsh --print-full-init | grep -v "^PROMPT2="'
+zflash eval 'print -r -- "PROMPT2=${(q+)$(starship prompt --continuation)}"'
+
+# ── completions only ─────────────────────────────────────────────────────
+zflash fpath zsh-users/zsh-completions src
+
+# ── after the first prompt (cached compinit runs first, automatically) ───
+zflash defer ~/.zsh/completion.zsh
+zflash defer ~/.oh-my-zsh plugins/git
+
+# conda: `conda shell.zsh hook` took ~290 ms per shell; now captured at build
+# time, from the first conda install found. Run `zflash build` after
+# installing or upgrading conda.
+zflash eval --defer 'for c in ~/anaconda3 ~/miniconda3 /opt/anaconda3 /opt/miniconda3; do [[ -x $c/bin/conda ]] && { $c/bin/conda shell.zsh hook; break }; done; true'
+
+# typing help (order matters: syntax-highlighting first)
+zflash defer zsh-users/zsh-syntax-highlighting
+zflash defer zsh-users/zsh-history-substring-search
+zflash defer zsh-users/zsh-autosuggestions
+zflash defer ~/.zsh/keybindings.zsh   # ↑/↓ search history by what's typed
+
+# my aliases, last so they win over plugin aliases
+zflash defer ~/.zsh/aliases.zsh
+EOF
+
+backup "$HOME/.zsh/options.zsh"
+cat > "$HOME/.zsh/options.zsh" <<'EOF'
+# Shell options, set before the first prompt (loaded by zflash, see
+# ~/.config/zflash/plugins.zsh). They live here because setopt inside a deferred
+# file is undone when that file finishes (zsh-defer runs it with LOCAL_OPTIONS).
+# These are the options oh-my-zsh and ~/.zsh/completion.zsh used to set.
+
+# directories (oh-my-zsh lib/directories.zsh)
+setopt auto_cd             # type a folder name to cd into it
+setopt auto_pushd          # every cd remembers the previous folder (`d` lists them)
+setopt pushd_ignore_dups
+setopt pushd_minus
+
+# completion (~/.zsh/completion.zsh, oh-my-zsh lib/completion.zsh)
+setopt complete_in_word
+setopt always_to_end
+unsetopt menu_complete     # don't autoselect the first completion entry
+unsetopt flow_control      # free Ctrl+S / Ctrl+Q
+
+# misc (oh-my-zsh lib/misc.zsh)
+setopt interactive_comments  # allow `# comments` on the command line
+setopt long_list_jobs
+EOF
+
+backup "$HOME/.zsh/exports.zsh"
+cat > "$HOME/.zsh/exports.zsh" <<'EOF'
+# Environment set before the first prompt (loaded by zflash, see ~/.config/zflash/plugins.zsh).
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+# Keep PATH free of duplicates; ~/.local/bin (uv) stays first.
+typeset -gU path   # -g: zflash sources this from inside a function
+path=($HOME/.local/bin $path)
+EOF
+
+backup "$HOME/.zsh/keybindings.zsh"
+cat > "$HOME/.zsh/keybindings.zsh" <<'EOF'
+# Key bindings for plugins (deferred by zflash, after the plugins load).
+
+# zsh-history-substring-search: type part of a command, then ↑/↓ cycles
+# through past commands that contain it.
+bindkey '^[[A' history-substring-search-up
+bindkey '^[[B' history-substring-search-down
+bindkey '^[OA' history-substring-search-up
+bindkey '^[OB' history-substring-search-down
+EOF
+
+backup "$HOME/.zsh/aliases.zsh"
+cat > "$HOME/.zsh/aliases.zsh" <<'EOF'
+alias ls='ls --color=auto'                    # colorize `ls` output
+alias zshreload='source ~/.zshrc'             # reload ZSH
+alias shtop='sudo htop'                       # run `htop` with root rights
+alias grep='grep --color=auto'                # colorize `grep` output
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias less='less -R'
+alias g='git'
+
+alias rm='rm -i'                              # confirm removal
+alias cp='cp -i'                              # confirm copy
+alias mv='mv -i'                              # confirm move
+alias cal='gcal --starting-day=1'             # print simple calendar for current month
+alias weather='curl v2.wttr.in'               # print weather for current location (https://github.com/chubin/wttr.in)
+
+
+alias cb='conda activate base'
+alias cdx='conda deactivate'
+
+cenv() {
+  conda activate "$1"
+}
+
+alias py='python3'
+alias pip='pip3'
+alias jl='jupyter lab'
+
+
+alias bup='sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y'
+EOF
+
+backup "$HOME/.zsh/completion.zsh"
+cat > "$HOME/.zsh/completion.zsh" <<'EOF'
+# fixme - the load process here seems a bit bizarre
+zmodload -i zsh/complist
+
+WORDCHARS=''
+
+unsetopt menu_complete   # do not autoselect the first completion entry
+unsetopt flowcontrol
+setopt auto_menu         # show completion menu on successive tab press
+setopt complete_in_word
+setopt always_to_end
+
+# should this be in keybindings?
+bindkey -M menuselect '^o' accept-and-infer-next-history
+zstyle ':completion:*:*:*:*:*' menu select
+
+# case insensitive (all), partial-word and substring completion
+if [[ "$CASE_SENSITIVE" = true ]]; then
+  zstyle ':completion:*' matcher-list 'r:|=*' 'l:|=* r:|=*'
+else
+  if [[ "$HYPHEN_INSENSITIVE" = true ]]; then
+    zstyle ':completion:*' matcher-list 'm:{[:lower:][:upper:]-_}={[:upper:][:lower:]_-}' 'r:|=*' 'l:|=* r:|=*'
+  else
+    zstyle ':completion:*' matcher-list 'm:{[:lower:][:upper:]}={[:upper:][:lower:]}' 'r:|=*' 'l:|=* r:|=*'
+  fi
+fi
+unset CASE_SENSITIVE HYPHEN_INSENSITIVE
+
+# Complete . and .. special directories
+zstyle ':completion:*' special-dirs true
+
+zstyle ':completion:*' list-colors ''
+zstyle ':completion:*:*:kill:*:processes' list-colors '=(#b) #([0-9]#) ([0-9a-z-]#)*=01;34=0=01'
+
+if [[ "$OSTYPE" = solaris* ]]; then
+  zstyle ':completion:*:*:*:*:processes' command "ps -u $USERNAME -o pid,user,comm"
+else
+  zstyle ':completion:*:*:*:*:processes' command "ps -u $USERNAME -o pid,user,comm -w -w"
+fi
+
+# disable named-directories autocompletion
+zstyle ':completion:*:cd:*' tag-order local-directories directory-stack path-directories
+
+# Use caching so that commands like apt and dpkg complete are usable
+zstyle ':completion:*' use-cache yes
+zstyle ':completion:*' cache-path $ZSH_CACHE_DIR
+
+# Don't complete uninteresting users
+zstyle ':completion:*:*:*:users' ignored-patterns \
+        adm amanda apache at avahi avahi-autoipd beaglidx bin cacti canna \
+        clamav daemon dbus distcache dnsmasq dovecot fax ftp games gdm \
+        gkrellmd gopher hacluster haldaemon halt hsqldb ident junkbust kdm \
+        ldap lp mail mailman mailnull man messagebus mldonkey mysql nagios \
+        named netdump news nfsnobody nobody nscd ntp nut nx obsrun openvpn \
+        operator pcap polkitd postfix postgres privoxy pulse pvm quagga radvd \
+        rpc rpcuser rpm rtkit scard shutdown squid sshd statd svn sync tftp \
+        usbmux uucp vcsa wwwrun xfs '_*'
+
+# ... unless we really want to.
+zstyle '*' single-ignored show
+
+if [[ ${COMPLETION_WAITING_DOTS:-false} != false ]]; then
+  expand-or-complete-with-dots() {
+    # use $COMPLETION_WAITING_DOTS either as toggle or as the sequence to show
+    [[ $COMPLETION_WAITING_DOTS = true ]] && COMPLETION_WAITING_DOTS="%F{red}…%f"
+    # turn off line wrapping and print prompt-expanded "dot" sequence
+    printf '\e[?7l%s\e[?7h' "${(%)COMPLETION_WAITING_DOTS}"
+    zle expand-or-complete
+    zle redisplay
+  }
+  zle -N expand-or-complete-with-dots
+  # Set the function as the default tab completion widget
+  bindkey -M emacs "^I" expand-or-complete-with-dots
+  bindkey -M viins "^I" expand-or-complete-with-dots
+  bindkey -M vicmd "^I" expand-or-complete-with-dots
+fi
+
+# automatically load bash completion functions
+autoload -U +X bashcompinit && bashcompinit
+EOF
+
+backup "$HOME/.zsh/history.zsh"
+cat > "$HOME/.zsh/history.zsh" <<'EOF'
+## History wrapper
+function omz_history {
+  # parse arguments and remove from $@
+  local clear list stamp REPLY
+  zparseopts -E -D c=clear l=list f=stamp E=stamp i=stamp t:=stamp
+
+  if [[ -n "$clear" ]]; then
+    # if -c provided, clobber the history file
+
+    # confirm action before deleting history
+    print -nu2 "This action will irreversibly delete your command history. Are you sure? [y/N] "
+    builtin read -E
+    [[ "$REPLY" = [yY] ]] || return 0
+
+    print -nu2 >| "$HISTFILE"
+    fc -p "$HISTFILE"
+
+    print -u2 History file deleted.
+  elif [[ $# -eq 0 ]]; then
+    # if no arguments provided, show full history starting from 1
+    builtin fc "${stamp[@]}" -l 1
+  else
+    # otherwise, run `fc -l` with a custom format
+    builtin fc "${stamp[@]}" -l "$@"
+  fi
+}
+
+# Timestamp format
+case ${HIST_STAMPS-} in
+  "mm/dd/yyyy") alias history='omz_history -f' ;;
+  "dd.mm.yyyy") alias history='omz_history -E' ;;
+  "yyyy-mm-dd") alias history='omz_history -i' ;;
+  "") alias history='omz_history' ;;
+  *) alias history="omz_history -t '$HIST_STAMPS'" ;;
+esac
+
+## History file configuration
+[ -z "$HISTFILE" ] && HISTFILE="$HOME/.zsh_history"
+[ "$HISTSIZE" -lt 50000 ] && HISTSIZE=50000
+[ "$SAVEHIST" -lt 10000 ] && SAVEHIST=10000
+
+## History command configuration
+setopt extended_history       # record timestamp of command in HISTFILE
+setopt hist_expire_dups_first # delete duplicates first when HISTFILE size exceeds HISTSIZE
+setopt hist_ignore_dups       # ignore duplicated commands history list
+setopt hist_ignore_space      # ignore commands that start with space
+setopt hist_verify            # show command with history expansion to user before running it
+setopt share_history          # share command history data
+EOF
+
+# ---------------------------------------------------------------------------
+# Default shell
+# ---------------------------------------------------------------------------
+ZSH_PATH="$(command -v zsh)"
+CURRENT_SHELL="$(getent passwd "$USER" | cut -d: -f7 || true)"
+if [ "$CURRENT_SHELL" != "$ZSH_PATH" ]; then
+  info "Changing your login shell to $ZSH_PATH (you may be asked for your password)"
+  chsh -s "$ZSH_PATH" || warn "Could not change the login shell. Run: chsh -s $ZSH_PATH"
+fi
+
+# ---------------------------------------------------------------------------
+# First zflash build: clones the zsh plugins and compiles the init file
+# ---------------------------------------------------------------------------
+info "Building the zsh init with zflash (clones plugins from GitHub)"
+if ! zsh -i -c exit; then
+  warn "zflash build reported errors; open a new shell and run 'zflash build' to see them."
+fi
+
+info "Done."
+cat <<EOF
+
+Next steps:
+  1. Log out and reconnect (e.g. over SSH) so the new login shell and locale
+     take effect.
+  2. For joined, right-to-left Persian text, use a terminal that supports it on
+     the machine you connect from (run setup-desktop.sh there).
+
+Replaced config files were saved with the suffix .bak-$STAMP
+EOF
