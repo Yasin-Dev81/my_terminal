@@ -9,7 +9,7 @@ There are two scripts:
 | [`setup-desktop.sh`](setup-desktop.sh) | macOS (Intel / Apple Silicon), Debian / Ubuntu desktop | Hyper, fonts, Persian/RTL plugin, full zsh setup |
 | [`setup-server.sh`](setup-server.sh) | Headless Debian / Ubuntu server | zsh setup only (no Hyper, no fonts) |
 
-Both support `amd64` and `arm64`.
+`setup-desktop.sh` supports `amd64` and `arm64`. `setup-server.sh` supports `amd64`, `arm64`, and 32-bit x86 (`i386`/`i686`).
 
 ## Quick start
 

@@ -2,7 +2,7 @@
 #
 # setup-server.sh — reproduce the zsh shell setup on a headless server.
 #
-# Supported: Debian / Ubuntu (amd64 / arm64). Can run as root or as a normal
+# Supported: Debian / Ubuntu (amd64 / arm64 / i386). Can run as root or as a normal
 # user with sudo. For a desktop with Hyper and fonts use setup-desktop.sh.
 #
 # What it sets up:
@@ -44,8 +44,9 @@ backup() {
 command -v apt-get >/dev/null 2>&1 || die "Only Debian/Ubuntu (apt) Linux distributions are supported."
 
 case "$(uname -m)" in
-  x86_64|amd64)  ARCH=amd64 ;;
-  arm64|aarch64) ARCH=arm64 ;;
+  x86_64|amd64)        ARCH=amd64 ;;
+  arm64|aarch64)       ARCH=arm64 ;;
+  i386|i486|i586|i686) ARCH=i386 ;;
   *) die "Unsupported CPU architecture: $(uname -m)" ;;
 esac
 
